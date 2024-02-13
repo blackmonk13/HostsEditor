@@ -171,91 +171,190 @@ function Backup-HostsFile {
         New-Item -Path $backupPath -Force | Out-Null
     }
 
-    Get-Content -Path $hostsPath | Set-Content -Path $backupPath
-    Write-Host "Backup complete."
+    try {
+        # Copy the hosts file to the backup location
+        Copy-Item -Path $hostsPath -Destination $backupPath -Force
+        Write-Host "Backup complete."
+    }
+    catch {
+        Write-Error "Failed to backup hosts file: $_"
+    }
 }
+
 
 function Restore-HostsBackup {
     if (Test-Path -Path $backupPath) {
-        Get-Content -Path $backupPath | Set-Content -Path $hostsPath
+        try {
+            # Overwrite the current hosts file with the backup
+            Copy-Item -Path $backupPath -Destination $hostsPath -Force
+            Write-Host "Hosts file restored from backup."
+        }
+        catch {
+            Write-Error "Failed to restore hosts file from backup: $_"
+        }
     }
     else {
-        Set-Content -Path $hostsPath -Value $defaultHostsContent
+        Write-Host "No backup available to restore."
     }
+
+    FlushDNSCache
 }
 
+
 function Enable-Entry([string]$address, [string]$hostName) {
-    # Construct the disabled entry pattern with the special comment
-    $disabledEntryPattern = "^#\s*$disabledComment\s*$address\s+$hostName$"
+    $tempFile = "$hostsPath.tmp"
+    $disabledCommentPattern = "^#\s*$disabledComment\s*$address\s+$hostName$"
 
-    # Read the hosts file
-    $fileContent = Get-Content -Path $hostsPath
+    try {
+        # Open the original file and a temporary file
+        $reader = [System.IO.StreamReader]::new($hostsPath)
+        $writer = [System.IO.StreamWriter]::new($tempFile)
 
-    # Find the disabled entry and replace it with the enabled version
-    $enabledContent = $fileContent -creplace $disabledEntryPattern, "$address`t$hostName"
+        while (($line = $reader.ReadLine()) -ne $null) {
+            if ($line -match $disabledCommentPattern) {
+                # Found the disabled entry, replace it with the enabled version
+                $writer.WriteLine("$address`t$hostName")
+            }
+            else {
+                # Not the line to enable, write it as is
+                $writer.WriteLine($line)
+            }
+        }
 
-    # Write the updated content back to the hosts file
-    $enabledContent | Set-Content -Path $hostsPath
+        # Close the reader and writer
+        $reader.Close()
+        $writer.Close()
+
+        # Replace the original file with the temporary one
+        Remove-Item -Path $hostsPath
+        Rename-Item -Path $tempFile -NewName $hostsPath
+    }
+    catch {
+        Write-Error "An error occurred during file operation: $_"
+    }
+    finally {
+        # Ensure the reader and writer are closed
+        if ($reader -ne $null) { $reader.Dispose() }
+        if ($writer -ne $null) { $writer.Dispose() }
+
+        # Ensure the temp file is deleted if it exists
+        if (Test-Path -Path $tempFile) {
+            Remove-Item -Path $tempFile -Force
+        }
+    }
 
     FlushDNSCache
 }
 
 function Disable-Entry([string]$address, [string]$hostName) {
-    # Construct the entry with a special comment
-    
-    $entry = "$address`t$hostName"
-    $disabledEntry = "# $disabledComment`t$entry"
+    $tempFile = "$hostsPath.tmp"
 
-    # Read the hosts file
-    $fileContent = Get-Content -Path $hostsPath
 
-    # Replace the active entry with the disabled entry
-    $updatedContent = $fileContent -replace "^$address\s+$hostName$", $disabledEntry
+    try {
+        # Open the original file and a temporary file
+        $reader = Get-Content -Path $hostsPath -ReadCount  1
+        $writer = [IO.StreamWriter]::new($tempFile)
 
-    # Write the updated content back to the hosts file
-    $updatedContent | Out-File -FilePath $hostsPath
+        foreach ($line in $reader) {
+            if ($line -match "^$address\s+$hostName$") {
+                # Found the active entry, replace it with the disabled version
+                $writer.WriteLine("# $disabledComment`t$line")
+            }
+            else {
+                # Not the line to disable, write it as is
+                $writer.WriteLine($line)
+            }
+        }
+
+        # Close the writer and move the temp file to overwrite the original
+        $writer.Close()
+        Move-Item -Path $tempFile -Destination $hostsPath -Force
+    }
+    catch {
+        Write-Error "An error occurred during file operation: $_"
+    }
+    finally {
+        # Ensure the temp file is deleted if it exists
+        if (Test-Path -Path $tempFile) {
+            Remove-Item -Path $tempFile -Force
+        }
+    }
 
     FlushDNSCache
 }
 
 function Add-Entry([string]$address, [string]$hostName) {
-    
-    # Construct the entry with at least one space between IP and hostname
-    $entry = "$address`t$hostName"
+    $tempFile = "$hostsPath.tmp"
+    $entryPattern = "^$address\s+$hostName$"
 
-    # Regular expression pattern to match the entry in the hosts file
-    $pattern = "^$address\s+$hostName$"
+    try {
+        # Open the original file and a temporary file
+        $reader = Get-Content -Path $hostsPath -ReadCount   1
+        $writer = [IO.StreamWriter]::new($tempFile)
 
-    # Check if the entry already exists in the hosts file
-    $existingEntry = Get-Content -Path $hostsPath | Where-Object { $_ -cmatch $pattern }
+        # Flag to track if the entry was found
+        $found = $false
 
+        foreach ($line in $reader) {
+            if ($line -match $entryPattern) {
+                # Entry already exists, so we don't need to add it again
+                $found = $true
+            }
+            # Write the line regardless of whether it matches the pattern
+            $writer.WriteLine($line)
+        }
 
-    if ($existingEntry) {
-        Write-Host ""
-        Write-Host "URL $entry is already in the hosts file."
+        # If the entry was not found, add it to the temporary file
+        if (-not $found) {
+            $writer.WriteLine("$address`t$hostName")
+        }
+
+        # Close the writer and move the temp file to overwrite the original
+        $writer.Close()
+        Move-Item -Path $tempFile -Destination $hostsPath -Force
     }
-    else {
-        # Add the entry to the hosts file if it does not exist
-        Add-Content -Path $hostsPath -Value $entry
-        Write-Host ""
-        Write-Host "URL $entry successfully added to the hosts file."
+    catch {
+        Write-Error "An error occurred during file operation: $_"
+    }
+    finally {
+        # Ensure the temp file is deleted if it exists
+        if (Test-Path -Path $tempFile) {
+            Remove-Item -Path $tempFile -Force
+        }
     }
 
     FlushDNSCache
 }
 
 function Remove-Entry([string]$address, [string]$hostName) {
-    # Construct the entry pattern
+    $tempFile = "$hostsPath.tmp"
     $entryPattern = "^$address\s+$hostName$"
 
-    # Read the hosts file
-    $fileContent = Get-Content -Path $hostsPath
+    try {
+        # Open the original file and a temporary file
+        $reader = Get-Content -Path $hostsPath -ReadCount  1
+        $writer = [IO.StreamWriter]::new($tempFile)
 
-    # Filter out the line to remove
-    $filteredContent = $fileContent | Where-Object { $_ -notmatch $entryPattern }
+        foreach ($line in $reader) {
+            if (-not ($line -match $entryPattern)) {
+                # Only write lines that do not match the entry pattern
+                $writer.WriteLine($line)
+            }
+        }
 
-    # Write the filtered content back to the hosts file
-    $filteredContent | Set-Content -Path $hostsPath -Force
+        # Close the writer and move the temp file to overwrite the original
+        $writer.Close()
+        Move-Item -Path $tempFile -Destination $hostsPath -Force
+    }
+    catch {
+        Write-Error "An error occurred during file operation: $_"
+    }
+    finally {
+        # Ensure the temp file is deleted if it exists
+        if (Test-Path -Path $tempFile) {
+            Remove-Item -Path $tempFile -Force
+        }
+    }
 
     FlushDNSCache
 }
@@ -281,8 +380,6 @@ function CheckAndSanitizeEntry([string]$address, [string]$hostName) {
 
     return $sanitizedAddress, $sanitizedHostName
 }
-
-
 
 function Invoke-MainMode($command) {
 
