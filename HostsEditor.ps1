@@ -1,15 +1,15 @@
 ﻿# region GlobalVariables
 $banner = @"
- _   _           _       
-| | | | ___  ___| |_ ___ 
-| |_| |/ _ \/ __| __/ __|
-|  _  | (_) \__ \ |_\__ \
-|_| |_|\___/|___/\__|___/                        
- _____    _ _ _             
-| ____|__| (_) |_ ___  _ __ 
-|  _| / _` | | __/ _ \| '__|
-| |__| (_| | | || (_) | |   
-|_____\__,_|_|\__\___/|_|   
+╭─╮ ╭─╮              ╭─╮
+│ │ │ │╭─────╮╭─────╮│ ╰──╮╭─────╮
+│ ╰─╯ ││ ╭─╮ ││ ────╮│ ╭──╯│ ────╮
+│ ╭─╮ ││ ╰─╯ │╰──── ││ ╰──╮╰──── │
+╰─╯ ╰─╯╰─────╯╰─────╯╰────╯╰─────╯
+╭─────╮    ╭─╮╭─╮╭─╮
+│  ═══╯╭───╯ │╰─╯│ ╰──╮╭─────╮╭─┯──╮
+│ ╭──╯ │ ╭─╮ │╭─╮│ ╭──╯│ ╭─╮ ││ ╭──╯
+│ ╰───╮│ ╰─╯ ││ ││ ╰──╮│ ╰─╯ ││ │
+╰─────╯╰─────╯╰─╯╰────╯╰─────╯╰─╯
 "@
 
 
@@ -75,7 +75,11 @@ enum EditMenuOptions {
 function Show-Banner {
     Clear-Host
     Write-Host $banner -ForegroundColor Green
-    Write-Host "-cantbebroken@protonmail.com-" -ForegroundColor Cyan
+    Write-Host "╭──────────────────────────────────────────────╮" -ForegroundColor Green
+    Write-Host -NoNewline "┝─[" -ForegroundColor Green
+    Write-Host -NoNewline "https://github.com/blackmonk13/HostsEditor" -ForegroundColor Cyan
+    Write-Host "]─┥" -ForegroundColor Green
+    Write-Host "╰──────────────────────────────────────────────╯" -ForegroundColor Green
     Write-Host ""
 }
 
@@ -84,6 +88,18 @@ function Show-Prompt {
 
     if (-not $isAdmin) {
         Write-Host "You need to run as an Administrator." -ForegroundColor Red
+        # The script is not running with administrator privileges, so re-launch the script with elevated permissions
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'powershell.exe'
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $psi.Verb = 'RunAs'
+        $psi.WorkingDirectory = (Get-Location).Path
+
+        # Start the new process
+        [System.Diagnostics.Process]::Start($psi)
+
+        # Exit the current, unelevated, process
+        exit
     }
 
     Write-Host "┍─╼[$env:USERNAME@$env:COMPUTERNAME]"
@@ -144,27 +160,50 @@ function Show-EditModeHelp {
 }
 
 function Show-HostsAsTable {
-    # Read the hosts file and split each line into an array
-    $hostsLines = Get-Content $hostsPath
+    # Define the pattern for a disabled entry
+    $disabledEntryPattern = "^#\s*$disabledComment\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$"
 
-    # Process each line to extract the IP and hostname, and determine if it's enabled or disabled
-    $hostsEntries = foreach ($line in $hostsLines) {
-        if ($line -match '^\s*([\d.]+)\s+(.*)$') {
-            $enabled = $false
-            if ($line -notmatch "^#\s*$disabledComment") {
-                $enabled = $true
+    # Initialize an array to hold the host entries
+    $hostsEntries = @()
+
+    try {
+        # Read the hosts file line by line
+        $lines = Get-Content -Path $hostsPath -ReadCount  1
+
+        foreach ($line in $lines) {
+            if ($line -match $disabledEntryPattern) {
+                # Extract the IP and hostname from the disabled entry
+                $foundMatches = $line -match $disabledEntryPattern
+                $ip = $foundMatches[1].Split()[0]
+                $hostname = $foundMatches[1].Split()[1]
+                $enabled = $false
             }
-            New-Object PSObject -Property @{
-                IPAddress = $matches[1]
-                HostName  = $matches[2]
+            elseif ($line -match "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$" ) {
+                # Extract the IP and hostname from the enabled entry
+                $parts = $line.Split()
+                $ip = $parts[0]
+                $hostname = $parts[1]
+                $enabled = $true
+            } else {
+                continue
+            }
+
+            # Create a custom object for the entry and add it to the array
+            $hostsEntries += New-Object PSObject -Property @{
+                IPAddress = $ip
+                HostName  = $hostname
                 Enabled   = $enabled
             }
         }
     }
+    catch {
+        Write-Error "An error occurred while reading the hosts file: $_"
+    }
 
-    # Display the entries in a table format
+    # Output the host entries as a table
     $hostsEntries | Format-Table -Property IPAddress, HostName, Enabled -AutoSize
 }
+
 
 function Backup-HostsFile {
     if (-not (Test-Path -Path $backupPath)) {
